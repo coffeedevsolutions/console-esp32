@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
+#include "secrets.h"
 
 #ifndef PIN_NEOPIXEL
   #define PIN_NEOPIXEL NEOPIXEL_PIN   // defined by QT Py S3 board package
@@ -11,8 +12,8 @@
 Adafruit_NeoPixel px(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 
 // ---- Wi-Fi (STA so emulator/phone/PC all reach it) ----
-const char* SSID = "BennysHome";
-const char* PASS = "mrbennythefirst";
+const char* SSID = WIFI_SSID;
+const char* PASS = WIFI_PASSWORD;
 
 // ---- HTTP server ----
 WebServer server(80);
