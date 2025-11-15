@@ -122,6 +122,27 @@ bool connectToBestSSID(){
 //          STATE
 // =========================
 
+// Filter type enumeration
+enum FilterType : uint8_t {
+  FILTER_BW = 0,  // Butterworth
+  FILTER_LR = 1   // Linkwitz-Riley
+};
+
+// Filter slope enumeration
+enum FilterSlope : uint8_t {
+  SLOPE_12 = 12,
+  SLOPE_18 = 18,
+  SLOPE_24 = 24,
+  SLOPE_36 = 36
+};
+
+// Physical input channel (A or B)
+struct Input {
+  float gainDb = 0.0f;      // dB  (-45..+15)
+  bool  mute = false;
+  bool  active = true;      // display only: signal present
+};
+
 struct Peq {
   float f=1000.0f;   // Hz
   float g=0.0f;      // dB  (-12..+12)
@@ -129,10 +150,10 @@ struct Peq {
 };
 
 struct Xover {
-  String type="LR";  // "BW" or "LR"
-  uint8_t slope=24;  // 12/18/24/36
-  float   freq=100.0f; // Hz
-  bool    enabled=false;
+  FilterType type = FILTER_LR;    // BW or LR
+  FilterSlope slope = SLOPE_24;   // 12/18/24/36 dB/oct
+  float freq = 100.0f;            // Hz (10..22000)
+  bool enabled = false;
 };
 
 struct Limiter {
@@ -145,15 +166,15 @@ struct Limiter {
 };
 
 struct Output {
-  String route="A";      // "A" | "B" | "A+B"
+  String route = "A";          // "A" | "B" | "A+B"
   Xover hpf;
   Xover lpf;
-  Peq   peq;
-  float delayMs=0.0f;    // 0..8
-  bool  invert=false;    // 0/180
+  Peq peq;
+  float delayMs = 0.0f;        // ms  (0..8 ≈ 275cm acoustic)
+  float phaseDeg = 0.0f;       // degrees (0..180)
   Limiter lim;
-  float gainDb=0.0f;     // -45..+15
-  bool  mute=false;
+  float gainDb = 0.0f;         // dB  (-45..+15)
+  bool mute = false;
 };
 
 struct Generators {
@@ -173,25 +194,61 @@ struct Battery {
   float v=12.6f, vmin=12.6f, vmax=12.6f; // display only
 };
 
+// =========================
+//   CROSSOVER TEMPLATES
+// =========================
+
+struct XoTemplate {
+  const char* name;
+  struct FilterConfig {
+    FilterType type;
+    FilterSlope slope;
+    float freq;
+    bool enabled;
+  } hpf, lpf;
+};
+
+const XoTemplate XO_TEMPLATES[11] PROGMEM = {
+  {"FullRange", {FILTER_LR, SLOPE_24, 20.0f, false},    {FILTER_LR, SLOPE_24, 20000.0f, false}},
+  {"Sub",       {FILTER_LR, SLOPE_24, 20.0f, false},    {FILTER_LR, SLOPE_24, 80.0f, true}},
+  {"Mid",       {FILTER_LR, SLOPE_24, 80.0f, true},     {FILTER_LR, SLOPE_24, 5000.0f, true}},
+  {"High",      {FILTER_LR, SLOPE_24, 5000.0f, true},   {FILTER_LR, SLOPE_24, 20000.0f, false}},
+  {"2wayLow",   {FILTER_LR, SLOPE_24, 20.0f, false},    {FILTER_LR, SLOPE_24, 3000.0f, true}},
+  {"2wayHigh",  {FILTER_LR, SLOPE_24, 3000.0f, true},   {FILTER_LR, SLOPE_24, 20000.0f, false}},
+  {"3wayLow",   {FILTER_LR, SLOPE_24, 20.0f, false},    {FILTER_LR, SLOPE_24, 250.0f, true}},
+  {"3wayMid",   {FILTER_LR, SLOPE_24, 250.0f, true},    {FILTER_LR, SLOPE_24, 3000.0f, true}},
+  {"3wayHigh",  {FILTER_LR, SLOPE_24, 3000.0f, true},   {FILTER_LR, SLOPE_24, 20000.0f, false}},
+  {"Bandpass",  {FILTER_LR, SLOPE_24, 80.0f, true},     {FILTER_LR, SLOPE_24, 5000.0f, true}},
+  {"Custom",    {FILTER_LR, SLOPE_24, 100.0f, false},   {FILTER_LR, SLOPE_24, 10000.0f, false}}
+};
+
 struct Device {
-  // Global
-  float master=0.50f;        // current master (0..1)
-  // Input path
-  float geq[15] = {0};       // 15-band ±12 dB
-  uint8_t geqPreset=0;       // 0..11
-  Peq inPeq;
-  // Output path
-  Output out[4];
-  // Crossover preset index (template)
-  uint8_t xoPreset=0;        // 0..10
-  // Tools
+  // Global master level
+  float master = 0.50f;        // current master (0..1)
+
+  // Physical inputs A & B
+  Input in[2];                 // in[0]=A, in[1]=B
+
+  // Input signal path
+  float geq[15] = {0};         // 15-band GEQ, ±12 dB
+  uint8_t geqPreset = 0;       // GEQ preset index (0..11)
+  Peq inPeq;                   // Input parametric EQ
+
+  // Output channels
+  Output out[4];               // 4 output channels
+
+  // Crossover preset index
+  uint8_t xoPreset = 0;        // XO template index (0..10)
+
+  // Test tools
   Generators gen;
   Sequencer seq;
   Battery bat;
-  // Misc
-  String lastCmd="none";
-  bool locked=false;
-  uint32_t lockCode=0;       // 000000..999999
+
+  // System state
+  String lastCmd = "none";
+  bool locked = false;
+  uint32_t lockCode = 0;       // 000000..999999
 } dev;
 
 // Smooth ramp target for master (so UI can be choppy, device stays smooth)
@@ -223,7 +280,17 @@ void stateToJson(JsonDocument& doc){
   auto jb = doc.createNestedObject("battery");
   jb["v"]=dev.bat.v; jb["min"]=dev.bat.vmin; jb["max"]=dev.bat.vmax;
 
-  // input
+  // physical inputs A & B
+  auto jins = doc.createNestedArray("inputs");
+  for(int i=0; i<2; i++){
+    auto jin = jins.createNestedObject();
+    jin["ch"] = (i==0) ? "A" : "B";
+    jin["gainDb"] = dev.in[i].gainDb;
+    jin["mute"] = dev.in[i].mute;
+    jin["active"] = dev.in[i].active;
+  }
+
+  // input signal path
   auto jin = doc.createNestedObject("input");
   auto jgeq = jin.createNestedArray("geq");
   for(int i=0;i<15;i++) jgeq.add(dev.geq[i]);
@@ -239,18 +306,23 @@ void stateToJson(JsonDocument& doc){
     jo["route"]=dev.out[ch].route;
     // HPF
     auto jh = jo.createNestedObject("hpf");
-    jh["type"]=dev.out[ch].hpf.type; jh["slope"]=dev.out[ch].hpf.slope;
-    jh["freq"]=dev.out[ch].hpf.freq; jh["enabled"]=dev.out[ch].hpf.enabled;
+    jh["type"]=(dev.out[ch].hpf.type == FILTER_BW) ? "BW" : "LR";
+    jh["slope"]=(uint8_t)dev.out[ch].hpf.slope;
+    jh["freq"]=dev.out[ch].hpf.freq;
+    jh["enabled"]=dev.out[ch].hpf.enabled;
     // LPF
     auto jl = jo.createNestedObject("lpf");
-    jl["type"]=dev.out[ch].lpf.type; jl["slope"]=dev.out[ch].lpf.slope;
-    jl["freq"]=dev.out[ch].lpf.freq; jl["enabled"]=dev.out[ch].lpf.enabled;
+    jl["type"]=(dev.out[ch].lpf.type == FILTER_BW) ? "BW" : "LR";
+    jl["slope"]=(uint8_t)dev.out[ch].lpf.slope;
+    jl["freq"]=dev.out[ch].lpf.freq;
+    jl["enabled"]=dev.out[ch].lpf.enabled;
     // PEQ
     auto jpo = jo.createNestedObject("peq");
     jpo["f"]=dev.out[ch].peq.f; jpo["g"]=dev.out[ch].peq.g; jpo["q"]=dev.out[ch].peq.q;
-    // Others
+    // Time alignment & phase
     jo["delayMs"]=dev.out[ch].delayMs;
-    jo["invert"]=dev.out[ch].invert;
+    jo["phaseDeg"]=dev.out[ch].phaseDeg;
+    jo["invert"]=(dev.out[ch].phaseDeg >= 179.0f);  // backward compat
     // Limiter
     auto jlim = jo.createNestedObject("limiter");
     jlim["thr"]=dev.out[ch].lim.threshold; jlim["atk"]=dev.out[ch].lim.attack;
@@ -297,7 +369,18 @@ bool loadWorking(){
   dev.bat.vmin    = doc["battery"]["min"] | dev.bat.vmin;
   dev.bat.vmax    = doc["battery"]["max"] | dev.bat.vmax;
 
-  // input
+  // physical inputs A & B
+  JsonArray ins = doc["inputs"].as<JsonArray>();
+  if(!ins.isNull() && ins.size()>=2){
+    for(int i=0; i<2; i++){
+      auto jin = ins[i];
+      dev.in[i].gainDb = clampf((float)(jin["gainDb"] | dev.in[i].gainDb), -45, +15);
+      dev.in[i].mute = (bool)(jin["mute"] | dev.in[i].mute);
+      dev.in[i].active = (bool)(jin["active"] | dev.in[i].active);
+    }
+  }
+
+  // input signal path
   JsonArray g = doc["input"]["geq"].as<JsonArray>();
   if(!g.isNull() && g.size()==15) for(int i=0;i<15;i++) dev.geq[i] = clampf(g[i].as<float>(), -12, +12);
   dev.geqPreset = doc["input"]["geqPreset"] | dev.geqPreset;
@@ -313,14 +396,22 @@ bool loadWorking(){
       dev.out[ch].route    = (const char*)(jo["route"] | dev.out[ch].route.c_str());
 
       auto jh = jo["hpf"];
-      dev.out[ch].hpf.type    = (const char*)(jh["type"] | dev.out[ch].hpf.type.c_str());
-      dev.out[ch].hpf.slope   = clampu8(jh["slope"] | dev.out[ch].hpf.slope, 12, 36);
+      if(jh.containsKey("type")){
+        const char* t = jh["type"];
+        dev.out[ch].hpf.type = (strcmp(t, "BW") == 0) ? FILTER_BW : FILTER_LR;
+      }
+      uint8_t slope_h = clampu8(jh["slope"] | (uint8_t)dev.out[ch].hpf.slope, 12, 36);
+      switch(slope_h){ case 12: dev.out[ch].hpf.slope=SLOPE_12; break; case 18: dev.out[ch].hpf.slope=SLOPE_18; break; case 24: dev.out[ch].hpf.slope=SLOPE_24; break; case 36: dev.out[ch].hpf.slope=SLOPE_36; break; default: dev.out[ch].hpf.slope=SLOPE_24; }
       dev.out[ch].hpf.freq    = clampf((float)(jh["freq"] | dev.out[ch].hpf.freq), 10, 22000);
       dev.out[ch].hpf.enabled = (bool)(jh["enabled"] | dev.out[ch].hpf.enabled);
 
       auto jl = jo["lpf"];
-      dev.out[ch].lpf.type    = (const char*)(jl["type"] | dev.out[ch].lpf.type.c_str());
-      dev.out[ch].lpf.slope   = clampu8(jl["slope"] | dev.out[ch].lpf.slope, 12, 36);
+      if(jl.containsKey("type")){
+        const char* t = jl["type"];
+        dev.out[ch].lpf.type = (strcmp(t, "BW") == 0) ? FILTER_BW : FILTER_LR;
+      }
+      uint8_t slope_l = clampu8(jl["slope"] | (uint8_t)dev.out[ch].lpf.slope, 12, 36);
+      switch(slope_l){ case 12: dev.out[ch].lpf.slope=SLOPE_12; break; case 18: dev.out[ch].lpf.slope=SLOPE_18; break; case 24: dev.out[ch].lpf.slope=SLOPE_24; break; case 36: dev.out[ch].lpf.slope=SLOPE_36; break; default: dev.out[ch].lpf.slope=SLOPE_24; }
       dev.out[ch].lpf.freq    = clampf((float)(jl["freq"] | dev.out[ch].lpf.freq), 10, 22000);
       dev.out[ch].lpf.enabled = (bool)(jl["enabled"] | dev.out[ch].lpf.enabled);
 
@@ -330,7 +421,10 @@ bool loadWorking(){
       dev.out[ch].peq.q = clampf((float)(jpo["q"] | dev.out[ch].peq.q), 0.4, 10.0);
 
       dev.out[ch].delayMs = clampf((float)(jo["delayMs"] | dev.out[ch].delayMs), 0, 8.0);
-      dev.out[ch].invert  = (bool)(jo["invert"]  | dev.out[ch].invert);
+      // Phase: support legacy "invert" or new "phaseDeg"
+      if(jo.containsKey("invert"))
+        dev.out[ch].phaseDeg = (bool)jo["invert"] ? 180.0f : 0.0f;
+      dev.out[ch].phaseDeg = clampf((float)(jo["phaseDeg"] | dev.out[ch].phaseDeg), 0, 180);
 
       auto jlim = jo["limiter"];
       dev.out[ch].lim.threshold   = clampf((float)(jlim["thr"] | dev.out[ch].lim.threshold), -24, 0);
@@ -391,8 +485,19 @@ bool loadPresetSlot(int slot){
   dev.master      = doc["master"]       | dev.master;
   masterTarget    = doc["masterTarget"] | dev.master;
 
+  // physical inputs A & B
+  JsonArray ins = doc["inputs"].as<JsonArray>();
+  if(!ins.isNull() && ins.size()>=2){
+    for(int i=0; i<2; i++){
+      auto jin = ins[i];
+      dev.in[i].gainDb = (float)(jin["gainDb"] | dev.in[i].gainDb);
+      dev.in[i].mute = (bool)(jin["mute"] | dev.in[i].mute);
+      dev.in[i].active = (bool)(jin["active"] | dev.in[i].active);
+    }
+  }
+
   JsonArray g = doc["input"]["geq"].as<JsonArray>();
-  if(!g.isNull() && g.size()==15) for(int i=0;i<15;i++) dev.geq[i] = clampf(g[i].as<float>(), -12, +12);
+  if(!g.isNull() && g.size()==15) for(int i=0;i<15;i++) dev.geq[i] = g[i].as<float>();
   dev.inPeq.f = doc["input"]["peq"]["f"] | dev.inPeq.f;
   dev.inPeq.g = doc["input"]["peq"]["g"] | dev.inPeq.g;
   dev.inPeq.q = doc["input"]["peq"]["q"] | dev.inPeq.q;
@@ -402,15 +507,23 @@ bool loadPresetSlot(int slot){
     for(int ch=0; ch<4; ch++){
       auto jo = outs[ch];
       dev.out[ch].route = (const char*)(jo["route"] | dev.out[ch].route.c_str());
-      auto jh = jo["hpf"]; 
-      dev.out[ch].hpf.type    = (const char*)(jh["type"] | dev.out[ch].hpf.type.c_str());
-      dev.out[ch].hpf.slope   = jh["slope"] | dev.out[ch].hpf.slope;
+      auto jh = jo["hpf"];
+      if(jh.containsKey("type")){
+        const char* t = jh["type"];
+        dev.out[ch].hpf.type = (strcmp(t, "BW") == 0) ? FILTER_BW : FILTER_LR;
+      }
+      uint8_t slope_h2 = (uint8_t)(jh["slope"] | (uint8_t)dev.out[ch].hpf.slope);
+      switch(slope_h2){ case 12: dev.out[ch].hpf.slope=SLOPE_12; break; case 18: dev.out[ch].hpf.slope=SLOPE_18; break; case 24: dev.out[ch].hpf.slope=SLOPE_24; break; case 36: dev.out[ch].hpf.slope=SLOPE_36; break; default: dev.out[ch].hpf.slope=SLOPE_24; }
       dev.out[ch].hpf.freq    = jh["freq"]  | dev.out[ch].hpf.freq;
       dev.out[ch].hpf.enabled = jh["enabled"] | dev.out[ch].hpf.enabled;
 
-      auto jl = jo["lpf"]; 
-      dev.out[ch].lpf.type    = (const char*)(jl["type"] | dev.out[ch].lpf.type.c_str());
-      dev.out[ch].lpf.slope   = jl["slope"] | dev.out[ch].lpf.slope;
+      auto jl = jo["lpf"];
+      if(jl.containsKey("type")){
+        const char* t = jl["type"];
+        dev.out[ch].lpf.type = (strcmp(t, "BW") == 0) ? FILTER_BW : FILTER_LR;
+      }
+      uint8_t slope_l2 = (uint8_t)(jl["slope"] | (uint8_t)dev.out[ch].lpf.slope);
+      switch(slope_l2){ case 12: dev.out[ch].lpf.slope=SLOPE_12; break; case 18: dev.out[ch].lpf.slope=SLOPE_18; break; case 24: dev.out[ch].lpf.slope=SLOPE_24; break; case 36: dev.out[ch].lpf.slope=SLOPE_36; break; default: dev.out[ch].lpf.slope=SLOPE_24; }
       dev.out[ch].lpf.freq    = jl["freq"]  | dev.out[ch].lpf.freq;
       dev.out[ch].lpf.enabled = jl["enabled"] | dev.out[ch].lpf.enabled;
 
@@ -420,7 +533,10 @@ bool loadPresetSlot(int slot){
       dev.out[ch].peq.q = jpo["q"] | dev.out[ch].peq.q;
 
       dev.out[ch].delayMs = jo["delayMs"] | dev.out[ch].delayMs;
-      dev.out[ch].invert  = jo["invert"]  | dev.out[ch].invert;
+      // Phase: support legacy "invert" or new "phaseDeg"
+      if(jo.containsKey("invert"))
+        dev.out[ch].phaseDeg = (bool)jo["invert"] ? 180.0f : 0.0f;
+      dev.out[ch].phaseDeg = (float)(jo["phaseDeg"] | dev.out[ch].phaseDeg);
 
       auto jlim = jo["limiter"];
       dev.out[ch].lim.threshold   = jlim["thr"] | dev.out[ch].lim.threshold;
@@ -517,6 +633,24 @@ void handleInputPeq(){
   sendJson("{\"ok\":true}");
 }
 
+void handleInputChannel(){
+  if(!requireCodeIfLocked()) return;
+  if(!server.hasArg("plain")){ sendJson("{\"ok\":false}", 400); return; }
+  StaticJsonDocument<256> d; if(deserializeJson(d, server.arg("plain"))){ sendJson("{\"ok\":false}",400); return; }
+  if(!d.containsKey("ch")){ sendJson("{\"ok\":false,\"err\":\"missing ch\"}",400); return; }
+  String ch = (const char*)d["ch"];
+  int idx = (ch == "A") ? 0 : (ch == "B") ? 1 : -1;
+  if(idx < 0){ sendJson("{\"ok\":false,\"err\":\"ch must be A or B\"}",400); return; }
+
+  if(d.containsKey("gainDb")) dev.in[idx].gainDb = clampf((float)d["gainDb"], -45, +15);
+  if(d.containsKey("mute")) dev.in[idx].mute = (bool)d["mute"];
+
+  Serial.printf("[API] input %s gainDb=%.1f mute=%d\n", ch.c_str(), dev.in[idx].gainDb, dev.in[idx].mute);
+  ack(0,32,0);
+  saveWorking();
+  sendJson("{\"ok\":true}");
+}
+
 void handleOutput(){
   if(!requireCodeIfLocked()) return;
   if(!server.hasArg("plain")){ sendJson("{\"ok\":false}", 400); return; }
@@ -527,15 +661,27 @@ void handleOutput(){
   if(d.containsKey("route")){ String r = (const char*)d["route"]; if(r=="A"||r=="B"||r=="A+B") o.route=r; }
   if(d.containsKey("hpf")){
     auto j=d["hpf"];
-    if(j.containsKey("type")){ String t=(const char*)j["type"]; if(t=="BW"||t=="LR") o.hpf.type=t; }
-    if(j.containsKey("slope")) o.hpf.slope = clampu8((int)j["slope"], 12, 36);
+    if(j.containsKey("type")){
+      String t=(const char*)j["type"];
+      if(t=="BW"||t=="LR") o.hpf.type = (strcmp(t.c_str(), "BW") == 0) ? FILTER_BW : FILTER_LR;
+    }
+    if(j.containsKey("slope")){
+      uint8_t s = clampu8((int)j["slope"], 12, 36);
+      switch(s){ case 12: o.hpf.slope=SLOPE_12; break; case 18: o.hpf.slope=SLOPE_18; break; case 24: o.hpf.slope=SLOPE_24; break; case 36: o.hpf.slope=SLOPE_36; break; default: o.hpf.slope=SLOPE_24; }
+    }
     if(j.containsKey("freq"))  o.hpf.freq  = clampf((float)j["freq"], 10, 22000);
     if(j.containsKey("enabled")) o.hpf.enabled = (bool)j["enabled"];
   }
   if(d.containsKey("lpf")){
     auto j=d["lpf"];
-    if(j.containsKey("type")){ String t=(const char*)j["type"]; if(t=="BW"||t=="LR") o.lpf.type=t; }
-    if(j.containsKey("slope")) o.lpf.slope = clampu8((int)j["slope"], 12, 36);
+    if(j.containsKey("type")){
+      String t=(const char*)j["type"];
+      if(t=="BW"||t=="LR") o.lpf.type = (strcmp(t.c_str(), "BW") == 0) ? FILTER_BW : FILTER_LR;
+    }
+    if(j.containsKey("slope")){
+      uint8_t s = clampu8((int)j["slope"], 12, 36);
+      switch(s){ case 12: o.lpf.slope=SLOPE_12; break; case 18: o.lpf.slope=SLOPE_18; break; case 24: o.lpf.slope=SLOPE_24; break; case 36: o.lpf.slope=SLOPE_36; break; default: o.lpf.slope=SLOPE_24; }
+    }
     if(j.containsKey("freq"))  o.lpf.freq  = clampf((float)j["freq"], 10, 22000);
     if(j.containsKey("enabled")) o.lpf.enabled = (bool)j["enabled"];
   }
@@ -546,7 +692,9 @@ void handleOutput(){
     if(j.containsKey("q")) o.peq.q = clampf((float)j["q"], 0.4,10.0);
   }
   if(d.containsKey("delayMs")) o.delayMs = clampf((float)d["delayMs"], 0, 8.0);
-  if(d.containsKey("invert"))  o.invert = (bool)d["invert"];
+  // Phase: support legacy "invert" or new "phaseDeg"
+  if(d.containsKey("invert")) o.phaseDeg = (bool)d["invert"] ? 180.0f : 0.0f;
+  if(d.containsKey("phaseDeg")) o.phaseDeg = clampf((float)d["phaseDeg"], 0, 180);
   if(d.containsKey("limiter")){
     auto j=d["limiter"];
     if(j.containsKey("thr"))  o.lim.threshold = clampf((float)j["thr"], -24, 0);
@@ -596,6 +744,61 @@ void handleSequencer(){
   ack(0,32,0);
   saveWorking();
   sendJson("{\"ok\":true}");
+}
+
+void handleXoApply(){
+  if(!requireCodeIfLocked()) return;
+  if(!server.hasArg("plain")){ sendJson("{\"ok\":false}", 400); return; }
+  StaticJsonDocument<512> d; if(deserializeJson(d, server.arg("plain"))){ sendJson("{\"ok\":false}",400); return; }
+
+  int preset = (int)d["preset"];
+  if(preset < 0 || preset >= 11){ sendJson("{\"ok\":false,\"err\":\"preset 0..10\"}",400); return; }
+
+  JsonArray channels = d["channels"].as<JsonArray>();
+  if(channels.isNull() || channels.size()==0){ sendJson("{\"ok\":false,\"err\":\"missing channels\"}",400); return; }
+
+  const XoTemplate& tpl = XO_TEMPLATES[preset];
+
+  for(JsonVariant v : channels){
+    int ch = (int)v - 1;
+    if(ch >= 0 && ch < 4){
+      dev.out[ch].hpf.type = tpl.hpf.type;
+      dev.out[ch].hpf.slope = tpl.hpf.slope;
+      dev.out[ch].hpf.freq = tpl.hpf.freq;
+      dev.out[ch].hpf.enabled = tpl.hpf.enabled;
+
+      dev.out[ch].lpf.type = tpl.lpf.type;
+      dev.out[ch].lpf.slope = tpl.lpf.slope;
+      dev.out[ch].lpf.freq = tpl.lpf.freq;
+      dev.out[ch].lpf.enabled = tpl.lpf.enabled;
+    }
+  }
+
+  dev.xoPreset = preset;
+
+  Serial.printf("[API] XO preset %d (%s) applied\n", preset, tpl.name);
+  ack(0,32,0);
+  saveWorking();
+
+  // Response with applied template details
+  StaticJsonDocument<512> resp;
+  resp["ok"] = true;
+  resp["applied"]["name"] = tpl.name;
+  auto jhpf = resp["applied"].createNestedObject("hpf");
+  jhpf["type"] = (tpl.hpf.type == FILTER_BW) ? "BW" : "LR";
+  jhpf["slope"] = (uint8_t)tpl.hpf.slope;
+  jhpf["freq"] = tpl.hpf.freq;
+  jhpf["enabled"] = tpl.hpf.enabled;
+  auto jlpf = resp["applied"].createNestedObject("lpf");
+  jlpf["type"] = (tpl.lpf.type == FILTER_BW) ? "BW" : "LR";
+  jlpf["slope"] = (uint8_t)tpl.lpf.slope;
+  jlpf["freq"] = tpl.lpf.freq;
+  jlpf["enabled"] = tpl.lpf.enabled;
+  auto jchs = resp.createNestedArray("channels");
+  for(JsonVariant v : channels) jchs.add((int)v);
+
+  String s; serializeJson(resp, s);
+  sendJson(s);
 }
 
 void handleBattery(){
@@ -682,13 +885,24 @@ void addCors(){
 
 void setup(){
   Serial.begin(115200); delay(150);
+  Serial.println("\n\n=== Console ESP32 Starting ===");
+
   px.begin(); px.setBrightness(24); px.show();
+  Serial.println("NeoPixel initialized");
 
   prefs.begin(NVS_NS, false);
+  Serial.println("NVS initialized");
+
   dev.lockCode = prefs.getUInt("lockCode", 0);
-  loadWorking();
+  Serial.println("Loading working state...");
+  if(loadWorking()){
+    Serial.println("Working state loaded from NVS");
+  } else {
+    Serial.println("No working state found, using defaults");
+  }
 
   // Connect to strongest BennysHome AP
+  Serial.println("Connecting to WiFi...");
   if(!connectToBestSSID()){
     Serial.println("WARNING: WiFi connection failed; HTTP API will not be reachable over network.");
   }
@@ -700,11 +914,13 @@ void setup(){
   server.on("/api/master", HTTP_POST, [](){ addCors(); handleMaster(); });
   server.on("/api/input/geq", HTTP_POST, [](){ addCors(); handleInputGeq(); });
   server.on("/api/input/peq", HTTP_POST, [](){ addCors(); handleInputPeq(); });
+  server.on("/api/input/channel", HTTP_POST, [](){ addCors(); handleInputChannel(); });
 
   server.on("/api/output", HTTP_POST, [](){ addCors(); handleOutput(); });
 
   server.on("/api/gen", HTTP_POST, [](){ addCors(); handleGenerators(); });
   server.on("/api/seq", HTTP_POST, [](){ addCors(); handleSequencer(); });
+  server.on("/api/xo/apply", HTTP_POST, [](){ addCors(); handleXoApply(); });
   server.on("/api/battery", HTTP_POST, [](){ addCors(); handleBattery(); });
 
   server.on("/api/lock", HTTP_POST, [](){ addCors(); handleLock(); });
@@ -718,17 +934,28 @@ void setup(){
   server.on("/api/master", HTTP_OPTIONS, opt204);
   server.on("/api/input/geq", HTTP_OPTIONS, opt204);
   server.on("/api/input/peq", HTTP_OPTIONS, opt204);
+  server.on("/api/input/channel", HTTP_OPTIONS, opt204);
   server.on("/api/output", HTTP_OPTIONS, opt204);
   server.on("/api/gen", HTTP_OPTIONS, opt204);
   server.on("/api/seq", HTTP_OPTIONS, opt204);
+  server.on("/api/xo/apply", HTTP_OPTIONS, opt204);
   server.on("/api/battery", HTTP_OPTIONS, opt204);
   server.on("/api/lock", HTTP_OPTIONS, opt204);
   server.on("/api/preset/save", HTTP_OPTIONS, opt204);
   server.on("/api/preset/load", HTTP_OPTIONS, opt204);
   server.on("/api/preset/copy", HTTP_OPTIONS, opt204);
 
+  Serial.println("Starting HTTP server...");
   server.begin();
-  Serial.println("HTTP server ready");
+  Serial.println("=================================");
+  Serial.println("HTTP server ready!");
+  if(WiFi.status() == WL_CONNECTED){
+    Serial.print("Server IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi not connected - server only accessible locally");
+  }
+  Serial.println("=================================");
 }
 
 void loop(){
