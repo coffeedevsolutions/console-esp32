@@ -901,7 +901,7 @@ void setup(){
     Serial.println("No working state found, using defaults");
   }
 
-  // Connect to strongest BennysHome AP
+  // Connect to strongest WiFi network
   Serial.println("Connecting to WiFi...");
   if(!connectToBestSSID()){
     Serial.println("WARNING: WiFi connection failed; HTTP API will not be reachable over network.");
