@@ -553,6 +553,67 @@ bool loadPresetSlot(int slot){
 }
 
 // =========================
+//  Future Timpano bridge
+// =========================
+
+// For now these just log what *would* be sent to the TPT-SP4BT.
+// Later you'll replace the Serial prints with UART/I2C/SPI commands.
+
+void applyFullConfigToTimpano(){
+  Serial.println("[TIMPANO] applyFullConfigToTimpano()");
+
+  // Master
+  Serial.printf("  master = %.2f (0..1)\n", dev.master);
+
+  // Input GEQ + PEQ
+  Serial.print("  input GEQ bands (dB):");
+  for(int i=0; i<15; ++i){
+    Serial.printf(" %.1f", dev.geq[i]);
+  }
+  Serial.printf("\n  input PEQ: f=%.1fHz g=%.1fdB q=%.2f\n",
+                dev.inPeq.f, dev.inPeq.g, dev.inPeq.q);
+
+  // Outputs
+  for(int ch=0; ch<4; ++ch){
+    const auto &o = dev.out[ch];
+    Serial.printf("  ch%d route=%s gain=%.1fdB mute=%d delay=%.2fms phase=%.1fdeg\n",
+                  ch+1, o.route.c_str(), o.gainDb, (int)o.mute, o.delayMs, o.phaseDeg);
+
+    // HPF
+    Serial.printf("    HPF: type=%s slope=%ddB/oct freq=%.1fHz en=%d\n",
+                  (o.hpf.type==FILTER_BW) ? "BW" : "LR",
+                  (int)o.hpf.slope, o.hpf.freq, (int)o.hpf.enabled);
+
+    // LPF
+    Serial.printf("    LPF: type=%s slope=%ddB/oct freq=%.1fHz en=%d\n",
+                  (o.lpf.type==FILTER_BW) ? "BW" : "LR",
+                  (int)o.lpf.slope, o.lpf.freq, (int)o.lpf.enabled);
+
+    // Output PEQ
+    Serial.printf("    PEQ: f=%.1fHz g=%.1fdB q=%.2f\n",
+                  o.peq.f, o.peq.g, o.peq.q);
+
+    // Limiter
+    Serial.printf("    Lim: thr=%.1fdB atk=%.1fms rel=%.1fms auto=%d en=%d act=%d\n",
+                  o.lim.threshold, o.lim.attack, o.lim.release,
+                  (int)o.lim.autoRelease, (int)o.lim.enabled, (int)o.lim.active);
+  }
+
+  // Generators
+  Serial.printf("  gen: sineEn=%d sineHz=%.1f sineDb=%.1f\n",
+                (int)dev.gen.sineEn, dev.gen.sineHz, dev.gen.sineLevelDb);
+  Serial.printf("       sweepEn=%d start=%.1f end=%.1f sweepDb=%.1f\n",
+                (int)dev.gen.sweepEn, dev.gen.sweepStart, dev.gen.sweepEnd, dev.gen.sweepLevelDb);
+  Serial.printf("       pinkEn=%d pinkDb=%.1f\n",
+                (int)dev.gen.pinkEn, dev.gen.pinkLevelDb);
+
+  // XO preset
+  Serial.printf("  xoPreset = %u\n", dev.xoPreset);
+
+  // Later: send all of this over UART/I2C/SPI to the TPT-SP4BT.
+}
+
+// =========================
 //    AUTH (6-digit pin)
 // =========================
 bool requireCodeIfLocked(){
@@ -589,6 +650,17 @@ void handleStateGet(){
   StaticJsonDocument<4096> doc; stateToJson(doc); String s; serializeJson(doc, s); sendJson(s);
 }
 
+void handleDspConfigGet(){
+  // For now just reuse the full state JSON.
+  // This gives the mobile app a semantically named endpoint.
+  handleStateGet();
+}
+
+void handleDspStatus(){
+  // Alias to /api/status for naming symmetry
+  handleStatus();
+}
+
 void handleMaster(){
   if(!requireCodeIfLocked()) return;
   if(!server.hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}", 400); return; }
@@ -600,6 +672,7 @@ void handleMaster(){
   Serial.printf("[API] master target -> %.0f%%\n", masterTarget*100);
   ack(0,32,0);
   saveWorking(); // persists masterTarget via /state JSON
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -617,6 +690,7 @@ void handleInputGeq(){
   Serial.println("[API] input GEQ updated");
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -630,6 +704,7 @@ void handleInputPeq(){
   Serial.printf("[API] input PEQ f=%.1f g=%.1f q=%.2f\n", dev.inPeq.f, dev.inPeq.g, dev.inPeq.q);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -648,6 +723,7 @@ void handleInputChannel(){
   Serial.printf("[API] input %s gainDb=%.1f mute=%d\n", ch.c_str(), dev.in[idx].gainDb, dev.in[idx].mute);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -709,6 +785,7 @@ void handleOutput(){
   Serial.printf("[API] out%d updated\n", ch+1);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -729,6 +806,7 @@ void handleGenerators(){
   Serial.println("[API] generators updated");
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -743,6 +821,7 @@ void handleSequencer(){
   Serial.printf("[API] sequencer S1=%d S2=%d S3=%d int=%ums\n", dev.seq.s1, dev.seq.s2, dev.seq.s3, dev.seq.intervalMs);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -779,6 +858,7 @@ void handleXoApply(){
   Serial.printf("[API] XO preset %d (%s) applied\n", preset, tpl.name);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
 
   // Response with applied template details
   StaticJsonDocument<512> resp;
@@ -855,6 +935,7 @@ void handlePresetLoad(){
   Serial.printf("[API] preset loaded slot=%d\n", slot);
   ack(0,32,0);
   saveWorking();
+  applyFullConfigToTimpano();
   sendJson("{\"ok\":true}");
 }
 
@@ -910,6 +991,9 @@ void setup(){
   // Routes
   server.on("/api/status", HTTP_GET, [](){ addCors(); handleStatus(); });
   server.on("/api/state",  HTTP_GET, [](){ addCors(); handleStateGet(); });
+
+  server.on("/api/dsp/config", HTTP_GET, handleDspConfigGet);
+  server.on("/api/dsp/status", HTTP_GET, handleDspStatus);
 
   server.on("/api/master", HTTP_POST, [](){ addCors(); handleMaster(); });
   server.on("/api/input/geq", HTTP_POST, [](){ addCors(); handleInputGeq(); });
